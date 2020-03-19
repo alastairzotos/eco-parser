@@ -1,13 +1,21 @@
 import { Dictionary } from 'lodash';
 
+import { Bundler } from './bundler';
 import { FuncClosure, ReturnValueException } from './closure';
 import { HtmlElement } from './html';
 import { IOperatorType, ITokenType } from './lexer';
 import { parseExpression } from './parser';
 import { Runtime } from './runtime';
 
+export const statementListToSource = (list: StatementNode[], bundler: Bundler): string =>
+    list.map(item => item.toSource(bundler) + (item instanceof ExpressionNode ? ';' : '')).join('');
+
+export const expressionListToSource = (list: ExpressionNode[], bundler: Bundler): string =>
+    list.map(item => item.toSource(bundler)).join(', ');
+
 export class ParseNode {
     evaluate = (runtime: Runtime): any => undefined;
+    toSource = (bundler: Bundler): string => '';
 }
 
 export class ErrorNode extends ParseNode {
@@ -50,7 +58,47 @@ export class VariableNode extends ParseNode {
 
     evaluate = (runtime: Runtime) => {
         if (this.defaultValue) {
-            this.assignValue(runtime, runtime.evaluateNode(this.defaultValue));
+            const defaultValue = runtime.evaluateNode(this.defaultValue);
+            this.assignValue(runtime, defaultValue);
+            return defaultValue;
+        }
+    }
+
+    toSource = (bundler: Bundler): string => {
+        const defaultValue = () =>
+            this.defaultValue ? ` = ${this.defaultValue.toSource(bundler)}` : '';
+
+        switch (this.variableType) {
+            case IVariableNodeType.Identifier: {
+                return (
+                    `${
+                        this.left as string
+                    }${defaultValue()}`
+                );
+            }
+
+            case IVariableNodeType.DestructureArray: {
+                const vars = this.left as IDestructuredValue[];
+                return (
+                    `[${
+                        vars.map(destructured => (
+                            `${destructured.isRest ? '...' : ''}${destructured.name}${destructured.defaultValue ? ` = ${destructured.defaultValue.toSource(bundler)}` : ''}`
+                        )).join(', ')
+                    }]${defaultValue()}`
+                );
+            }
+
+            case IVariableNodeType.DestructureObject: {
+                const vars = this.left as IDestructuredValue[];
+
+                return (
+                    `{${
+                        vars.map(destructured => (
+                            `${destructured.isRest ? '...' : ''}${destructured.name}${destructured.defaultValue ? ` = ${destructured.defaultValue.toSource(bundler)}` : ''}`
+                        )).join(', ')
+                    }}${defaultValue()}`
+                );
+            }
         }
     }
 
@@ -118,6 +166,110 @@ export class VarDeclNode extends StatementNode {
     isConst: boolean;
 
     evaluate = (runtime: Runtime) => runtime.evaluateNode(this.variableNode);
+
+    toSource = (bundler: Bundler): string => {
+        const keyword = this.isConst ? 'const' : 'let';
+
+        return `${keyword} ${this.variableNode.toSource(bundler)};`;
+    }
+}
+
+export interface IExportAsObject {
+    name?: string;
+    defaultObject?: boolean;
+    alias?: string;
+}
+
+export class ExportNode extends StatementNode {
+    constructor() {
+        super();
+    }
+
+    defaultValue: ExpressionNode;
+    varDeclNode: VarDeclNode;
+    fromFile: {
+        fileName: string;
+        allExports: boolean;
+        namedExports: IExportAsObject[];
+    };
+
+    toSource = (bundler: Bundler): string => {
+        if (this.defaultValue) {
+            bundler.setDefaultExport(this.defaultValue.toSource(bundler));
+            return '';
+        }
+
+        if (this.varDeclNode) {
+            const varNode = this.varDeclNode.variableNode;
+
+            if (typeof varNode.left === 'string') {
+                bundler.addExport(varNode.left);
+            } else {
+                varNode.left.forEach(destructured => {
+                    bundler.addExport(destructured.name);
+                });
+            }
+            return this.varDeclNode.toSource(bundler);
+        }
+
+        if (this.fromFile) {
+            const imp = bundler.handleSourceImport(this.fromFile.fileName);
+
+            if (this.fromFile.allExports) {
+                bundler.setDefaultExport(imp);
+                return '';
+            }
+
+            this.fromFile.namedExports.forEach(exp => bundler.addExport(exp.name, exp.alias));
+            return `const {${ this.fromFile.namedExports.map(exp => exp.name).join(', ') }} = ${imp};`;
+        }
+    }
+}
+
+export interface IImportObject {
+    name: string;
+    alias?: string;
+}
+
+export class ImportNode extends StatementNode {
+    constructor() {
+        super();
+    }
+
+    defaultName: string;
+    namespaceName: string;
+    objects: IImportObject[];
+    fromFile: string;
+
+    toSource = (bundler: Bundler) => {
+        const imp = bundler.handleSourceImport(this.fromFile);
+
+        if (this.defaultName) {
+            return `const ${this.defaultName} = ${imp};`;
+        }
+
+        if (this.namespaceName) {
+            return `const ${this.namespaceName} = ${imp};`;
+        }
+
+        if (this.objects) {
+            const aliases: Dictionary<string> = {};
+
+            const result = `const {${
+                this.objects.map(obj => {
+                    if (obj.alias) {
+                        aliases[obj.name] = obj.alias;
+                    }
+                    return obj.name;
+                }).join(', ')
+            }} = ${imp};`;
+
+            const aliasSource = Object.keys(aliases)
+                .reduce((cur, key) => cur + `const ${aliases[key]} = ${key};`, '');
+
+            return result + aliasSource;
+        }
+    }
 }
 
 export class BlockNode extends StatementNode {
@@ -146,6 +298,9 @@ export class BlockNode extends StatementNode {
 
         runtime.popScope();
     }
+
+    toSource = (bundler: Bundler): string =>
+        `{${statementListToSource(this.statements, bundler)}}`
 }
 
 export class ReturnNode extends StatementNode {
@@ -162,6 +317,9 @@ export class ReturnNode extends StatementNode {
                 : undefined
         );
     }
+
+    toSource = (bundler: Bundler): string =>
+        `return${this.returnValue ? ` ${this.returnValue.toSource(bundler)}` : ''};`
 }
 
 export class IfNode extends StatementNode {
@@ -180,6 +338,17 @@ export class IfNode extends StatementNode {
             runtime.evaluateNode(this.elseStatement);
         }
     }
+
+    toSource = (bundler: Bundler): string =>
+        `if (${
+            this.condition.toSource(bundler)
+        }) ${
+            this.thenStatement.toSource(bundler)
+        }${
+            this.elseStatement
+            ? ` else ${this.elseStatement.toSource(bundler)}`
+            : ''
+        }`
 }
 
 export class WhileNode extends StatementNode {
@@ -195,6 +364,9 @@ export class WhileNode extends StatementNode {
             runtime.evaluateNode(this.loop);
         }
     }
+
+    toSource = (bundler: Bundler): string =>
+        `while (${this.condition.toSource(bundler)}) ${this.loop.toSource(bundler)}`
 }
 
 export class ThrowNode extends StatementNode {
@@ -207,6 +379,9 @@ export class ThrowNode extends StatementNode {
     evaluate = (runtime: Runtime) => {
         throw runtime.evaluateNode(this.value);
     }
+
+    toSource = (bundler: Bundler): string =>
+        `throw ${this.value.toSource(bundler)}`
 }
 
 export class TryCatchNode extends StatementNode {
@@ -251,6 +426,21 @@ export class TryCatchNode extends StatementNode {
             }
         }
     }
+
+    toSource = (bundler: Bundler): string =>
+        `try ${
+            this.tryBlock.toSource(bundler)
+        } catch${
+            this.catchErrorName
+            ? ` (${this.catchErrorName})`
+            : ''
+        } ${
+            this.catchBlock.toSource(bundler)
+        }${
+            this.finallyBlock
+            ? ` finally ${this.finallyBlock.toSource(bundler)}`
+            : ''
+        }`
 }
 
 export class ExpressionNode extends StatementNode {
@@ -269,6 +459,11 @@ export class LiteralNode extends ExpressionNode {
             ? this.interpolate(this.literalValue, runtime)
             : this.literalValue
 
+    toSource = (bundler: Bundler): string =>
+        typeof this.literalValue === 'string'
+        ? `'${this.literalValue}'`
+        : `${this.literalValue}`
+
     private interpolate = (input: string, runtime: Runtime) =>
         input.replace(
             /#{([^{}]*)}/g,
@@ -282,6 +477,8 @@ export class LoadNode extends ExpressionNode {
     }
 
     evaluate = (runtime: Runtime) => runtime.getLocal(this.varName);
+
+    toSource = (bundler: Bundler): string => this.varName;
 }
 
 export class ParenthesesNode extends ExpressionNode {
@@ -290,6 +487,8 @@ export class ParenthesesNode extends ExpressionNode {
     }
 
     evaluate = (runtime: Runtime) => runtime.evaluateNode(this.expression);
+
+    toSource = (bundler: Bundler): string => `(${this.expression.toSource(bundler)})`;
 }
 
 export class SpreadNode extends ExpressionNode {
@@ -298,6 +497,8 @@ export class SpreadNode extends ExpressionNode {
     }
 
     evaluate = (runtime: Runtime) => runtime.evaluateNode(this.value);
+
+    toSource = (bundler: Bundler) => `...${this.value.toSource(bundler)}`;
 }
 
 export class ArrayNode extends ExpressionNode {
@@ -319,6 +520,9 @@ export class ArrayNode extends ExpressionNode {
 
         return values;
     }
+
+    toSource = (bundler: Bundler) =>
+        `[${this.elements.map(element => element.toSource(bundler)).join(', ')}]`
 }
 
 export enum IObjectFieldType {
@@ -379,6 +583,28 @@ export class ObjectNode extends ExpressionNode {
 
         return obj;
     }
+
+    toSource = (bundler: Bundler): string => {
+        const defaultValue = (field: IObjectField) => field.data.value ? `: ${field.data.value.toSource(bundler)}` : '';
+        return (
+            `{${
+                this.fields.map(field => (
+                    field.fieldType === IObjectFieldType.Regular
+                    ? (
+                        `${
+                            typeof (field.data as IObjectRegularField).key === 'string'
+                            ? `'${(field.data as IObjectRegularField).key}'`
+                            : (field.data as IObjectRegularField).key
+                        }${defaultValue(field)}`
+                    ) : (
+                        field.fieldType === IObjectFieldType.Dynamic
+                        ? `[${(field.data as IObjectDynamicField).key.toSource(bundler)}]${defaultValue(field)}`
+                        : `...${(field.data.value.toSource(bundler))}`
+                    )
+                ))
+            }}`
+        );
+    }
 }
 
 export class FunctionNode extends ExpressionNode {
@@ -390,6 +616,9 @@ export class FunctionNode extends ExpressionNode {
     body: StatementNode;
 
     evaluate = (runtime: Runtime) => this.generateClosure(runtime).func;
+
+    toSource = (bundler: Bundler) =>
+        `(${this.parameters.map(param => param.toSource(bundler)).join(', ')}) => ${this.body.toSource(bundler)}`
 
     protected generateClosure = (runtime: Runtime): FuncClosure => {
         const closure = new FuncClosure();
@@ -459,6 +688,8 @@ export class UnaryOpNode extends ExpressionNode {
             case '-': return -runtime.evaluateNode(this.expr);
         }
     }
+
+    toSource = (bundler: Bundler) => `${this.opType}${this.expr.toSource(bundler)}`;
 }
 
 export class IncOrDecNode extends ExpressionNode {
@@ -507,6 +738,11 @@ export class IncOrDecNode extends ExpressionNode {
             }
         }
     }
+
+    toSource = (bundler: Bundler) =>
+        this.preOp
+        ? this.opType + this.expr.toSource(bundler)
+        : this.expr.toSource(bundler) + this.opType
 }
 
 export class BinaryOpNode extends ExpressionNode {
@@ -537,6 +773,9 @@ export class BinaryOpNode extends ExpressionNode {
             case '-': return runtime.evaluateNode(this.left) - runtime.evaluateNode(this.right);
         }
     }
+
+    toSource = (bundler: Bundler): string =>
+        `${this.left.toSource(bundler)} ${this.opType} ${this.right.toSource(bundler)}`
 }
 
 export class AssignmentNode extends BinaryOpNode {
@@ -649,6 +888,9 @@ export class TernaryOpNode extends ExpressionNode {
         runtime.evaluateNode(this.condition)
         ? runtime.evaluateNode(this.thenExpr)
         : runtime.evaluateNode(this.elseExpr)
+
+    toSource = (bundler: Bundler) =>
+        `${this.condition.toSource(bundler)} ? ${this.thenExpr.toSource(bundler)} : ${this.elseExpr.toSource(bundler)}`
 }
 
 export class ArrayAccessNode extends ExpressionNode {
@@ -660,6 +902,9 @@ export class ArrayAccessNode extends ExpressionNode {
 
     evaluate = (runtime: Runtime) =>
         runtime.evaluateNode(this.object)[runtime.evaluateNode(this.index)]
+
+    toSource = (bundler: Bundler) =>
+        `${this.object.toSource(bundler)}[${this.index.toSource(bundler)}]`
 }
 
 export class FieldAccessNode extends ExpressionNode {
@@ -671,6 +916,9 @@ export class FieldAccessNode extends ExpressionNode {
 
     evaluate = (runtime: Runtime) =>
         runtime.evaluateNode(this.object)[this.field]
+
+    toSource = (bundler: Bundler): string =>
+        `${this.object.toSource(bundler)}.${this.field}`
 }
 
 export class FuncCallNode extends ExpressionNode {
@@ -686,6 +934,9 @@ export class FuncCallNode extends ExpressionNode {
 
         return obj.apply(runtime.global, args);
     }
+
+    toSource = (bundler: Bundler): string =>
+        `${this.object.toSource(bundler)}(${expressionListToSource(this.args, bundler)})`
 }
 
 export class MethodCallNode extends ExpressionNode {
@@ -703,6 +954,9 @@ export class MethodCallNode extends ExpressionNode {
 
         return obj[this.fieldName].apply(obj, args);
     }
+
+    toSource = (bundler: Bundler): string =>
+        `${this.object.toSource(bundler)}.${this.fieldName}(${expressionListToSource(this.args, bundler)})`
 }
 
 export class NewNode extends ExpressionNode {
@@ -715,6 +969,9 @@ export class NewNode extends ExpressionNode {
 
     evaluate = (runtime: Runtime) =>
         runtime.instantiate(this.className, this.args.map(arg => runtime.evaluateNode(arg)))
+
+    toSource = (bundler: Bundler): string =>
+        `new ${this.className}(${expressionListToSource(this.args, bundler)})`
 }
 
 export class TypeofNode extends ExpressionNode {
@@ -725,6 +982,9 @@ export class TypeofNode extends ExpressionNode {
     expr: ExpressionNode;
 
     evaluate = (runtime: Runtime) => typeof runtime.evaluateNode(this.expr);
+
+    toSource = (bundler: Bundler): string =>
+        `typeof ${this.expr.toSource(bundler)}`
 }
 
 export class HTMLNode extends ExpressionNode {
@@ -757,6 +1017,20 @@ export class HTMLNode extends ExpressionNode {
 
         return new HtmlElement(this.tagName, attributes, children);
     }
+
+    toSource = (bundler: Bundler): string => {
+        const attributes = Object.keys(this.attributes).map(key => `${key}=${
+            this.attributes[key] instanceof LiteralNode && typeof this.attributes[key].literalValue === 'string'
+            ? `"${this.attributes[key].literalValue}"`
+            : `{${this.attributes[key].toSource(bundler)}}`
+        }`).join(' ');
+
+        if (this.children.length === 0) {
+            return `<${this.tagName} ${attributes} />`;
+        } else {
+            return `<${this.tagName} ${attributes}>${this.children.map(child => child.toSource(bundler)).join('')}</${this.tagName}>`;
+        }
+    }
 }
 
 export class HTMLExprNode extends ExpressionNode {
@@ -765,6 +1039,8 @@ export class HTMLExprNode extends ExpressionNode {
     }
 
     evaluate = (runtime: Runtime) => runtime.evaluateNode(this.expr);
+
+    toSource = (bundler: Bundler): string => `{${this.expr.toSource(bundler)}}`;
 }
 
 export class HTMLTextNode extends ExpressionNode {
@@ -773,6 +1049,8 @@ export class HTMLTextNode extends ExpressionNode {
     }
 
     evaluate = (runtime: Runtime) => this.text;
+
+    toSource = (bundler: Bundler): string => this.text;
 }
 
 export class TemplateStringNode extends ExpressionNode {
@@ -782,6 +1060,12 @@ export class TemplateStringNode extends ExpressionNode {
     parts: ExpressionNode[] = [];
 
     evaluate = (runtime: Runtime) => this.parts.map(part => runtime.evaluateNode(part)).join('');
+
+    toSource = (bundler: Bundler): string => '`' + this.parts.map(part => (
+        part instanceof TemplateStringContentNode
+        ? part.toSource(bundler)
+        : `\${${part.toSource(bundler)}}`
+    )).join('') + '`'
 }
 
 export class TemplateStringContentNode extends ExpressionNode {
@@ -790,4 +1074,6 @@ export class TemplateStringContentNode extends ExpressionNode {
     }
 
     evaluate = (runtime: Runtime) => this.content;
+
+    toSource = (bundler: Bundler): string => this.content;
 }

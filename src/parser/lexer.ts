@@ -46,6 +46,8 @@ const keywords = [
     'while',
     'try', 'catch', 'finally', 'throw',
     'typeof',
+    'export', 'default', 'expose',
+    'import', 'from', 'as'
 ] as const;
 
 export type ITokenType =

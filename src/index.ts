@@ -4,3 +4,4 @@ export * from './parser/html';
 export * from './parser/runtime';
 export * from './parser/closure';
 export * from './parser/lexer';
+export * from './parser/bundler';

@@ -8,6 +8,7 @@ import {
     BinaryOpNode,
     BlockNode,
     ErrorNode,
+    ExportNode,
     ExpressionNode,
     FieldAccessNode,
     FuncCallNode,
@@ -16,7 +17,10 @@ import {
     HTMLNode,
     HTMLTextNode,
     IDestructuredValue,
+    IExportAsObject,
     IfNode,
+    IImportObject,
+    ImportNode,
     IncOrDecNode,
     IObjectDynamicField,
     IObjectFieldType,
@@ -45,13 +49,14 @@ import {
     VariableNode,
     WhileNode
 } from './nodes';
-import { IRuntimeArgs, Runtime } from './runtime';
+import { Runtime } from './runtime';
 
-class Parser {
+export class Parser {
     constructor(input: string) {
         this.lexer = new Lexer(input);
     }
     private lexer: Lexer;
+    private blockDepth: number = 0;
 
     parseExpression = (): ParseNode => this.parseAssignment();
 
@@ -75,6 +80,8 @@ class Parser {
             'return': () => this.parseReturn(),
             'throw': () => this.parseThrow(),
             'try': () => this.parseTryCatch(),
+            'import': () => this.parseImport(),
+            'export': () => this.parseExport(),
             ';': () => {
                 this.lexer.consume(';');
                 return new NoopNode();
@@ -84,6 +91,153 @@ class Parser {
             this.lexer.consume(';');
             return expression;
         });
+    }
+
+    private parseImport = (): ImportNode => {
+        if (this.blockDepth > 0) {
+            throw new ParserError(this.lexer, this.lexer.getLastPosition(), 'Imports must be top level');
+        }
+
+        this.lexer.consume('import');
+        const node = new ImportNode();
+
+        if (this.lexer.peek('{')) {
+
+            this.lexer.consume();
+            const objects: IImportObject[] = [];
+
+            if (!this.lexer.peek('}')) {
+                const parseImportObject = () => {
+                    const name = this.lexer.consume('identifier').value as string;
+
+                    if (this.lexer.peek('as')) {
+                        this.lexer.consume();
+                        const alias = this.lexer.consume('identifier').value as string;
+
+                        objects.push({
+                            name,
+                            alias
+                        });
+                    } else {
+                        objects.push({
+                            name
+                        });
+                    }
+                };
+
+                parseImportObject();
+
+                while (this.lexer.peek(',')) {
+                    this.lexer.consume();
+
+                    parseImportObject();
+                }
+            }
+
+            this.lexer.consume('}');
+
+            node.objects = objects;
+            this.lexer.consume('from');
+            node.fromFile = this.lexer.consume('string').value;
+
+        } else if (this.lexer.peekOperator('*')) {
+            this.lexer.consume();
+            this.lexer.consume('as');
+            node.namespaceName = this.lexer.consume('identifier').value;
+            this.lexer.consume('from');
+            node.fromFile = this.lexer.consume('string').value;
+        } else if (this.lexer.peek('identifier')) {
+            node.defaultName = this.lexer.consume('identifier').value;
+            this.lexer.consume('from');
+            node.fromFile = this.lexer.consume('string').value;
+        } else {
+            node.fromFile = this.lexer.consume('string').value;
+        }
+
+        return node;
+    }
+
+    private parseExport = (): ExportNode => {
+        if (this.blockDepth > 0) {
+            throw new ParserError(this.lexer, this.lexer.getLastPosition(), 'Exports must be top level');
+        }
+
+        this.lexer.consume('export');
+
+        const node = new ExportNode();
+
+        if (this.lexer.peek('default')) {
+            this.lexer.consume();
+
+            node.defaultValue = this.parseExpression();
+            this.lexer.consume(';');
+        } else if (this.lexer.peek('{')) {
+            this.lexer.consume();
+
+            const namedExports: IExportAsObject[] = [];
+
+            if (!this.lexer.peek('}')) {
+                const parseNamedExport = () => {
+                    if (this.lexer.peek('default')) {
+                        this.lexer.consume();
+                        this.lexer.consume('as');
+                        const alias = this.lexer.consume('identifier').value as string;
+
+                        namedExports.push({
+                            defaultObject: true,
+                            alias
+                        });
+                    } else {
+                        const name = this.lexer.consume('identifier').value as string;
+                        if (this.lexer.peek('as')) {
+                            this.lexer.consume();
+                            const alias = this.lexer.consume('identifier').value as string;
+
+                            namedExports.push({
+                                name,
+                                alias
+                            });
+                        } else {
+                            namedExports.push({
+                                name
+                            });
+                        }
+                    }
+                };
+
+                parseNamedExport();
+
+                while (this.lexer.peek(',')) {
+                    this.lexer.consume();
+
+                    parseNamedExport();
+                }
+            }
+
+            this.lexer.consume('}');
+            this.lexer.consume('from');
+            const fileName = this.lexer.consume('string').value as string;
+
+            node.fromFile = {
+                allExports: false,
+                namedExports,
+                fileName
+            };
+        } else if (this.lexer.peekOperator('*')) {
+            this.lexer.consume();
+            this.lexer.consume('from');
+            const fileName = this.lexer.consume('string').value as string;
+
+            node.fromFile = {
+                allExports: true,
+                namedExports: null,
+                fileName
+            };
+        } else {
+            node.varDeclNode = this.parseVarDecl(!!this.lexer.peek('const'));
+        }
+
+        return node;
     }
 
     private parseWhile = (): WhileNode => {
@@ -244,11 +398,13 @@ class Parser {
         const node = new BlockNode();
 
         this.lexer.consume('{');
+        this.blockDepth++;
 
         while (!this.lexer.peek('}')) {
             node.statements.push(this.parseStatement());
         }
 
+        this.blockDepth--;
         this.lexer.consume('}');
 
         return node;
@@ -546,11 +702,13 @@ class Parser {
 
         this.lexer.consume('=>');
 
+        this.blockDepth++;
         if (this.lexer.peek('{')) {
             node.body = this.parseBlock();
         } else {
             node.body = this.parseExpression();
         }
+        this.blockDepth--;
 
         return node;
     }
@@ -791,7 +949,6 @@ export const evaluate = (input: string, runtime: Runtime) => {
     const nodes = parser.parse();
 
     try {
-
         // Old-school for loop for efficiency
         for (let i = 0; i < nodes.length; i++) { // tslint:disable-line
             nodes[i].evaluate(runtime);
