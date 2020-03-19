@@ -7,6 +7,31 @@ import { IOperatorType, ITokenType } from './lexer';
 import { parseExpression } from './parser';
 import { Runtime } from './runtime';
 
+export const fileToSource = (list: StatementNode[], bundler: Bundler) =>
+    new Promise(async (resolve, reject) => {
+        try {
+            const importNodes = list.filter(item => item instanceof ImportNode) as ImportNode[];
+            const otherNodes = list.filter(item => !(item instanceof ImportNode));
+
+            let output = '';
+            for (const importNode of importNodes) {
+                output += await importNode.importToSource(bundler);
+            }
+
+            for (const otherNode of otherNodes) {
+                if (otherNode instanceof ExportNode) {
+                    output += await otherNode.exportToSource(bundler);
+                } else {
+                    output += otherNode.toSource(bundler) + (otherNode instanceof ExpressionNode ? ';' : '');
+                }
+            }
+
+            resolve(output);
+        } catch (e) {
+            reject(e);
+        }
+    });
+
 export const statementListToSource = (list: StatementNode[], bundler: Bundler): string =>
     list.map(item => item.toSource(bundler) + (item instanceof ExpressionNode ? ';' : '')).join('');
 
@@ -72,7 +97,7 @@ export class VariableNode extends ParseNode {
             case IVariableNodeType.Identifier: {
                 return (
                     `${
-                        this.left as string
+                    this.left as string
                     }${defaultValue()}`
                 );
             }
@@ -81,9 +106,9 @@ export class VariableNode extends ParseNode {
                 const vars = this.left as IDestructuredValue[];
                 return (
                     `[${
-                        vars.map(destructured => (
-                            `${destructured.isRest ? '...' : ''}${destructured.name}${destructured.defaultValue ? ` = ${destructured.defaultValue.toSource(bundler)}` : ''}`
-                        )).join(', ')
+                    vars.map(destructured => (
+                        `${destructured.isRest ? '...' : ''}${destructured.name}${destructured.defaultValue ? ` = ${destructured.defaultValue.toSource(bundler)}` : ''}`
+                    )).join(', ')
                     }]${defaultValue()}`
                 );
             }
@@ -93,9 +118,9 @@ export class VariableNode extends ParseNode {
 
                 return (
                     `{${
-                        vars.map(destructured => (
-                            `${destructured.isRest ? '...' : ''}${destructured.name}${destructured.defaultValue ? ` = ${destructured.defaultValue.toSource(bundler)}` : ''}`
-                        )).join(', ')
+                    vars.map(destructured => (
+                        `${destructured.isRest ? '...' : ''}${destructured.name}${destructured.defaultValue ? ` = ${destructured.defaultValue.toSource(bundler)}` : ''}`
+                    )).join(', ')
                     }}${defaultValue()}`
                 );
             }
@@ -117,12 +142,15 @@ export class VariableNode extends ParseNode {
                     if (destructuredVar) {
                         runtime.getScope()[destructuredVar.name] =
                             destructuredVar.isRest
-                            ? values.slice(index)
-                            : (
-                                values[index] === undefined
-                                ? (destructuredVar.defaultValue && runtime.evaluateNode(destructuredVar.defaultValue))
-                                : values[index]
-                            );
+                                ? values.slice(index)
+                                : (
+                                    values[index] === undefined
+                                        ? (
+                                            destructuredVar.defaultValue
+                                            && runtime.evaluateNode(destructuredVar.defaultValue)
+                                        )
+                                        : values[index]
+                                );
                     }
                 });
 
@@ -136,19 +164,22 @@ export class VariableNode extends ParseNode {
                 vars.forEach(destructuredVar => {
                     runtime.getScope()[destructuredVar.name] =
                         destructuredVar.isRest
-                        ? (
-                            Object.keys(values)
-                            .filter(key => !vars.find(dvar => dvar.name === key))
-                            .reduce((cur, key) => ({
-                                ...cur,
-                                [key]: values[key]
-                            }), {})
-                        )
-                        : (
-                            values[destructuredVar.name] === undefined
-                            ? (destructuredVar.defaultValue && runtime.evaluateNode(destructuredVar.defaultValue))
-                            : values[destructuredVar.name]
-                        );
+                            ? (
+                                Object.keys(values)
+                                    .filter(key => !vars.find(dvar => dvar.name === key))
+                                    .reduce((cur, key) => ({
+                                        ...cur,
+                                        [key]: values[key]
+                                    }), {})
+                            )
+                            : (
+                                values[destructuredVar.name] === undefined
+                                    ? (
+                                        destructuredVar.defaultValue
+                                        && runtime.evaluateNode(destructuredVar.defaultValue)
+                                    )
+                                    : values[destructuredVar.name]
+                            );
                 });
 
                 break;
@@ -193,37 +224,45 @@ export class ExportNode extends StatementNode {
         namedExports: IExportAsObject[];
     };
 
-    toSource = (bundler: Bundler): string => {
-        if (this.defaultValue) {
-            bundler.setDefaultExport(this.defaultValue.toSource(bundler));
-            return '';
-        }
+    exportToSource = async (bundler: Bundler): Promise<string> =>
+        new Promise(async (resolve, reject) => {
+            try {
+                if (this.defaultValue) {
+                    bundler.setDefaultExport(this.defaultValue.toSource(bundler));
+                    resolve('');
+                    return;
+                }
 
-        if (this.varDeclNode) {
-            const varNode = this.varDeclNode.variableNode;
+                if (this.varDeclNode) {
+                    const varNode = this.varDeclNode.variableNode;
 
-            if (typeof varNode.left === 'string') {
-                bundler.addExport(varNode.left);
-            } else {
-                varNode.left.forEach(destructured => {
-                    bundler.addExport(destructured.name);
-                });
+                    if (typeof varNode.left === 'string') {
+                        bundler.addExport(varNode.left);
+                    } else {
+                        varNode.left.forEach(destructured => {
+                            bundler.addExport(destructured.name);
+                        });
+                    }
+                    resolve(this.varDeclNode.toSource(bundler));
+                    return;
+                }
+
+                if (this.fromFile) {
+                    const imp = await bundler.handleSourceImport(this.fromFile.fileName);
+
+                    if (this.fromFile.allExports) {
+                        bundler.setDefaultExport(imp);
+                        resolve('');
+                        return;
+                    }
+
+                    this.fromFile.namedExports.forEach(exp => bundler.addExport(exp.name, exp.alias));
+                    resolve(`const {${this.fromFile.namedExports.map(exp => exp.name).join(', ')}} = ${imp};`);
+                }
+            } catch (e) {
+                reject(e);
             }
-            return this.varDeclNode.toSource(bundler);
-        }
-
-        if (this.fromFile) {
-            const imp = bundler.handleSourceImport(this.fromFile.fileName);
-
-            if (this.fromFile.allExports) {
-                bundler.setDefaultExport(imp);
-                return '';
-            }
-
-            this.fromFile.namedExports.forEach(exp => bundler.addExport(exp.name, exp.alias));
-            return `const {${ this.fromFile.namedExports.map(exp => exp.name).join(', ') }} = ${imp};`;
-        }
-    }
+        })
 }
 
 export interface IImportObject {
@@ -241,35 +280,42 @@ export class ImportNode extends StatementNode {
     objects: IImportObject[];
     fromFile: string;
 
-    toSource = (bundler: Bundler) => {
-        const imp = bundler.handleSourceImport(this.fromFile);
+    importToSource = (bundler: Bundler): Promise<string> =>
+        new Promise(async (resolve, reject) => {
+            try {
+                const imp = await bundler.handleSourceImport(this.fromFile);
 
-        if (this.defaultName) {
-            return `const ${this.defaultName} = ${imp};`;
-        }
+                if (this.defaultName) {
+                    resolve(`const ${this.defaultName} = ${imp};`);
+                    return;
+                }
 
-        if (this.namespaceName) {
-            return `const ${this.namespaceName} = ${imp};`;
-        }
+                if (this.namespaceName) {
+                    resolve(`const ${this.namespaceName} = ${imp};`);
+                    return;
+                }
 
-        if (this.objects) {
-            const aliases: Dictionary<string> = {};
+                if (this.objects) {
+                    const aliases: Dictionary<string> = {};
 
-            const result = `const {${
-                this.objects.map(obj => {
-                    if (obj.alias) {
-                        aliases[obj.name] = obj.alias;
-                    }
-                    return obj.name;
-                }).join(', ')
-            }} = ${imp};`;
+                    const result = `const {${
+                        this.objects.map(obj => {
+                            if (obj.alias) {
+                                aliases[obj.name] = obj.alias;
+                            }
+                            return obj.name;
+                        }).join(', ')
+                        }} = ${imp};`;
 
-            const aliasSource = Object.keys(aliases)
-                .reduce((cur, key) => cur + `const ${aliases[key]} = ${key};`, '');
+                    const aliasSource = Object.keys(aliases)
+                        .reduce((cur, key) => cur + `const ${aliases[key]} = ${key};`, '');
 
-            return result + aliasSource;
-        }
-    }
+                    resolve(result + aliasSource);
+                }
+            } catch (e) {
+                reject(e);
+            }
+        })
 }
 
 export class BlockNode extends StatementNode {
@@ -341,11 +387,11 @@ export class IfNode extends StatementNode {
 
     toSource = (bundler: Bundler): string =>
         `if (${
-            this.condition.toSource(bundler)
+        this.condition.toSource(bundler)
         }) ${
-            this.thenStatement.toSource(bundler)
+        this.thenStatement.toSource(bundler)
         }${
-            this.elseStatement
+        this.elseStatement
             ? ` else ${this.elseStatement.toSource(bundler)}`
             : ''
         }`
@@ -429,15 +475,15 @@ export class TryCatchNode extends StatementNode {
 
     toSource = (bundler: Bundler): string =>
         `try ${
-            this.tryBlock.toSource(bundler)
+        this.tryBlock.toSource(bundler)
         } catch${
-            this.catchErrorName
+        this.catchErrorName
             ? ` (${this.catchErrorName})`
             : ''
         } ${
-            this.catchBlock.toSource(bundler)
+        this.catchBlock.toSource(bundler)
         }${
-            this.finallyBlock
+        this.finallyBlock
             ? ` finally ${this.finallyBlock.toSource(bundler)}`
             : ''
         }`
@@ -461,13 +507,13 @@ export class LiteralNode extends ExpressionNode {
 
     toSource = (bundler: Bundler): string =>
         typeof this.literalValue === 'string'
-        ? `'${this.literalValue}'`
-        : `${this.literalValue}`
+            ? `'${this.literalValue}'`
+            : `${this.literalValue}`
 
     private interpolate = (input: string, runtime: Runtime) =>
         input.replace(
             /#{([^{}]*)}/g,
-            (_, subExpression) => `${ runtime.evaluateNode(parseExpression(subExpression)) }`,
+            (_, subExpression) => `${runtime.evaluateNode(parseExpression(subExpression))}`,
         )
 }
 
@@ -512,7 +558,7 @@ export class ArrayNode extends ExpressionNode {
 
         this.elements.forEach(element => {
             if (element instanceof SpreadNode) {
-                values = [...values,  ...runtime.evaluateNode(element)];
+                values = [...values, ...runtime.evaluateNode(element)];
             } else {
                 values.push(runtime.evaluateNode(element));
             }
@@ -588,20 +634,20 @@ export class ObjectNode extends ExpressionNode {
         const defaultValue = (field: IObjectField) => field.data.value ? `: ${field.data.value.toSource(bundler)}` : '';
         return (
             `{${
-                this.fields.map(field => (
-                    field.fieldType === IObjectFieldType.Regular
+            this.fields.map(field => (
+                field.fieldType === IObjectFieldType.Regular
                     ? (
                         `${
-                            typeof (field.data as IObjectRegularField).key === 'string'
+                        typeof (field.data as IObjectRegularField).key === 'string'
                             ? `'${(field.data as IObjectRegularField).key}'`
                             : (field.data as IObjectRegularField).key
                         }${defaultValue(field)}`
                     ) : (
                         field.fieldType === IObjectFieldType.Dynamic
-                        ? `[${(field.data as IObjectDynamicField).key.toSource(bundler)}]${defaultValue(field)}`
-                        : `...${(field.data.value.toSource(bundler))}`
+                            ? `[${(field.data as IObjectDynamicField).key.toSource(bundler)}]${defaultValue(field)}`
+                            : `...${(field.data.value.toSource(bundler))}`
                     )
-                ))
+            ))
             }}`
         );
     }
@@ -670,8 +716,8 @@ export class FunctionNode extends ExpressionNode {
             paramNode.assignValue(
                 runtime,
                 args[index] !== undefined
-                ? args[index]
-                : paramNode.defaultValue && runtime.evaluateNode(paramNode.defaultValue)
+                    ? args[index]
+                    : paramNode.defaultValue && runtime.evaluateNode(paramNode.defaultValue)
             );
         });
     }
@@ -741,8 +787,8 @@ export class IncOrDecNode extends ExpressionNode {
 
     toSource = (bundler: Bundler) =>
         this.preOp
-        ? this.opType + this.expr.toSource(bundler)
-        : this.expr.toSource(bundler) + this.opType
+            ? this.opType + this.expr.toSource(bundler)
+            : this.expr.toSource(bundler) + this.opType
 }
 
 export class BinaryOpNode extends ExpressionNode {
@@ -886,8 +932,8 @@ export class TernaryOpNode extends ExpressionNode {
 
     evaluate = (runtime: Runtime) =>
         runtime.evaluateNode(this.condition)
-        ? runtime.evaluateNode(this.thenExpr)
-        : runtime.evaluateNode(this.elseExpr)
+            ? runtime.evaluateNode(this.thenExpr)
+            : runtime.evaluateNode(this.elseExpr)
 
     toSource = (bundler: Bundler) =>
         `${this.condition.toSource(bundler)} ? ${this.thenExpr.toSource(bundler)} : ${this.elseExpr.toSource(bundler)}`
@@ -1021,9 +1067,9 @@ export class HTMLNode extends ExpressionNode {
     toSource = (bundler: Bundler): string => {
         const attributes = Object.keys(this.attributes).map(key => `${key}=${
             this.attributes[key] instanceof LiteralNode && typeof this.attributes[key].literalValue === 'string'
-            ? `"${this.attributes[key].literalValue}"`
-            : `{${this.attributes[key].toSource(bundler)}}`
-        }`).join(' ');
+                ? `"${this.attributes[key].literalValue}"`
+                : `{${this.attributes[key].toSource(bundler)}}`
+            }`).join(' ');
 
         if (this.children.length === 0) {
             return `<${this.tagName} ${attributes} />`;
@@ -1063,8 +1109,8 @@ export class TemplateStringNode extends ExpressionNode {
 
     toSource = (bundler: Bundler): string => '`' + this.parts.map(part => (
         part instanceof TemplateStringContentNode
-        ? part.toSource(bundler)
-        : `\${${part.toSource(bundler)}}`
+            ? part.toSource(bundler)
+            : `\${${part.toSource(bundler)}}`
     )).join('') + '`'
 }
 
