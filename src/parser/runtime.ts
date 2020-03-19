@@ -6,11 +6,16 @@ import { ParseNode } from './nodes';
 export type IScope = Dictionary<any>;
 
 export interface IRuntimeArgs {
-    scope: IScope;
+    scope?: IScope;
     global: any;
 }
 
 export class Runtime {
+    constructor(args?: IRuntimeArgs) {
+        if (args) {
+            this.setArgs(args);
+        }
+    }
     global: any;
 
     private scope: IScope[] = [];
@@ -18,6 +23,7 @@ export class Runtime {
     private stack: FuncClosure[] = [];
 
     setArgs = (args: IRuntimeArgs) => {
+        args = { scope: {}, ...args };
         this.global = args.global;
         this.scope.push(args.scope);
     }
