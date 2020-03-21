@@ -1,7 +1,5 @@
 import { Dictionary } from 'lodash';
 
-import { FuncClosure } from './closure';
-
 export const Tags = [
     '',
     'a',

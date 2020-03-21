@@ -1,4 +1,4 @@
-import { Dictionary, StringNullableChain } from 'lodash';
+import { Dictionary } from 'lodash';
 
 import { IOperatorType, IToken, ITokenType, Lexer, ParserError } from './lexer';
 import {
