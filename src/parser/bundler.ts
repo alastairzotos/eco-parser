@@ -5,10 +5,16 @@ import * as prettier from 'prettier';
 import { fileToSource } from './nodes';
 import { Parser } from './parser';
 
+export interface IResolvedFileName {
+    name: string;
+    currentDir?: string;
+}
+
 export type IFileNameResolver = (
     currentDir: string,
-    filename: string,
-    setDirName?: (dirName: string) => void) => string;
+    filename: string
+) => Promise<IResolvedFileName>;
+
 export type IImportResolver = (filePath: string) => Promise<string>;
 
 export interface INamedExport {
@@ -42,10 +48,6 @@ const SKELETON_ENTRY_SECTION = '%%%__ENTRYPOINT__%%%';
 const SKELETON = `((modules) => {const cachedModules = {};const ${REQUIRE_NAME} = (moduleId) => {if (cachedModules[moduleId]) {return cachedModules[moduleId].exports;}const module = {exports: {}};cachedModules[moduleId] = module;modules[moduleId](module, ${REQUIRE_NAME});return module.exports;};return __eco_require__("${SKELETON_ENTRY_SECTION}");})({${SKELETON_MODULE_SECTION}});`;
 
 export class Bundler {
-    constructor() {
-        this.fileNameResolver = (currentDir, filename) => path.join(currentDir, filename);
-    }
-
     private fileNameResolver: IFileNameResolver;
     private importResolver: IImportResolver;
     private context: IBundlerContext[] = [];
@@ -98,8 +100,8 @@ export class Bundler {
             }
         })
 
-    resolveFileName = (currentDir: string, filename: string, setDirName: (dirName: string) => void) =>
-        this.fileNameResolver(currentDir, filename, setDirName)
+    resolveFileName = (currentDir: string, filename: string) =>
+        this.fileNameResolver(currentDir, filename)
 
     handleSourceImport = (filename: string): Promise<string> =>
         new Promise(async (resolve, reject) => {
@@ -125,21 +127,20 @@ export class Bundler {
         new Promise(async (resolve, reject) => {
             try {
                 let contextDir = path.join(currentDir, path.dirname(fileName));
-                const filePath = this.resolveFileName(contextDir, path.basename(fileName), dirName => {
-                    contextDir = dirName;
-                });
+                const resolved = await this.resolveFileName(contextDir, path.basename(fileName));
+                contextDir = resolved.currentDir;
 
-                if (filePath in this.files) {
-                    resolve(filePath);
+                if (resolved.name in this.files) {
+                    resolve(resolved.name);
                     return;
                 }
 
-                this.files[filePath] = null;
+                this.files[resolved.name] = null;
 
                 this.pushContext(contextDir);
                 const ctx = this.getContext();
 
-                const resolvedImport = await this.importResolver(filePath);
+                const resolvedImport = await this.importResolver(resolved.name);
                 const parser = new Parser(resolvedImport);
                 const nodes = parser.parse();
 
@@ -147,8 +148,8 @@ export class Bundler {
                 const hasImports = this.getContext().hasImports;
                 const hasExports = ctx.defaultExport !== null || ctx.exports.length > 0;
 
-                this.files[filePath] = {
-                    name: filePath,
+                this.files[resolved.name] = {
+                    name: resolved.name,
                     hasExports,
                     hasImports,
                     content
@@ -156,7 +157,7 @@ export class Bundler {
 
                 this.popContext();
 
-                resolve(filePath);
+                resolve(resolved.name);
             } catch (e) {
                 reject(e);
             }
