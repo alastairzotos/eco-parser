@@ -1065,11 +1065,17 @@ export class HTMLNode extends ExpressionNode {
     }
 
     toSource = (bundler: Bundler): string => {
-        const attributes = Object.keys(this.attributes).map(key => `${key}=${
-            this.attributes[key] instanceof LiteralNode && typeof this.attributes[key].literalValue === 'string'
-                ? `"${this.attributes[key].literalValue}"`
-                : `{${this.attributes[key].toSource(bundler)}}`
-            }`).join(' ');
+        const attributes = Object.keys(this.attributes).map(key => {
+            let value: string;
+            const attr = this.attributes[key];
+            if (attr instanceof LiteralNode && typeof attr.literalValue === 'string') {
+                value = `"${attr.literalValue}"`;
+            } else {
+                value = `{${attr.toSource(bundler)}}`;
+            }
+
+            return `${key}=${value}`;
+        }).join(' ');
 
         if (this.children.length === 0) {
             return `<${this.tagName} ${attributes} />`;

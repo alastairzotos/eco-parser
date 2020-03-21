@@ -1,10 +1,14 @@
+import { Dictionary } from 'lodash';
 import * as path from 'path';
 import * as prettier from 'prettier';
 
 import { fileToSource } from './nodes';
 import { Parser } from './parser';
 
-export type IFileNameResolver = (currentDir: string, filename: string) => string;
+export type IFileNameResolver = (
+    currentDir: string,
+    filename: string,
+    setDirName?: (dirName: string) => void) => string;
 export type IImportResolver = (filePath: string) => Promise<string>;
 
 export interface INamedExport {
@@ -30,12 +34,12 @@ export interface IBundlerFile {
     hasImports: boolean;
 }
 
-const requireName = '__eco_require__';
+const REQUIRE_NAME = '__eco_require__';
 const SKELETON_MODULE_SECTION = '%%%__MODULES__%%%';
 const SKELETON_ENTRY_SECTION = '%%%__ENTRYPOINT__%%%';
 
 // tslint:disable-next-line
-const SKELETON = `((modules) => {const cachedModules = {};const ${requireName} = (moduleId) => {if (cachedModules[moduleId]) {return cachedModules[moduleId].exports;}const module = {exports: {}};cachedModules[moduleId] = module;modules[moduleId](module, ${requireName});return module.exports;};return __eco_require__("${SKELETON_ENTRY_SECTION}");})({${SKELETON_MODULE_SECTION}});`;
+const SKELETON = `((modules) => {const cachedModules = {};const ${REQUIRE_NAME} = (moduleId) => {if (cachedModules[moduleId]) {return cachedModules[moduleId].exports;}const module = {exports: {}};cachedModules[moduleId] = module;modules[moduleId](module, ${REQUIRE_NAME});return module.exports;};return __eco_require__("${SKELETON_ENTRY_SECTION}");})({${SKELETON_MODULE_SECTION}});`;
 
 export class Bundler {
     constructor() {
@@ -45,7 +49,7 @@ export class Bundler {
     private fileNameResolver: IFileNameResolver;
     private importResolver: IImportResolver;
     private context: IBundlerContext[] = [];
-    private files: IBundlerFile[] = [];
+    private files: Dictionary<IBundlerFile> = {};
 
     onResolveFilename = (resolver: IFileNameResolver) => {
         this.fileNameResolver = resolver;
@@ -67,13 +71,13 @@ export class Bundler {
                     ];
 
                     if (file.hasImports) {
-                        params.push(requireName);
+                        params.push(REQUIRE_NAME);
                     }
 
                     return `"${file.name}": (${params.join(', ')}) => {${file.content}}`;
                 };
 
-                const modules = this.files
+                const modules = Object.values(this.files)
                     .map(file => generateFileModule(file))
                     .join(', ');
 
@@ -83,27 +87,27 @@ export class Bundler {
 
                 resolve(
                     options.prettyPrint ?
-                    prettier.format(
-                        output,
-                        { parser: 'babel' }
-                    ) :
-                    output
+                        prettier.format(
+                            output,
+                            { parser: 'babel' }
+                        ) :
+                        output
                 );
             } catch (e) {
                 reject(e);
             }
         })
 
-    resolveFileName = (currentDir: string, filename: string) =>
-        this.fileNameResolver(currentDir, filename)
+    resolveFileName = (currentDir: string, filename: string, setDirName: (dirName: string) => void) =>
+        this.fileNameResolver(currentDir, filename, setDirName)
 
     handleSourceImport = (filename: string): Promise<string> =>
         new Promise(async (resolve, reject) => {
             try {
                 const ctx = this.getContext();
                 ctx.hasImports = true;
-                await this.bundleFile(this.getContext().currentDir, filename);
-                resolve(`${requireName}('${this.fileNameResolver(ctx.currentDir, filename)}')`);
+                const filePath = await this.bundleFile(this.getContext().currentDir, filename);
+                resolve(`${REQUIRE_NAME}('${filePath}')`);
             } catch (e) {
                 reject(e);
             }
@@ -117,28 +121,46 @@ export class Bundler {
         this.getContext().defaultExport = defaultExport;
     }
 
-    private bundleFile = async (currentDir: string, fileName: string) => {
-        this.pushContext(path.join(currentDir, path.dirname(fileName)));
-        const ctx = this.getContext();
+    private bundleFile = (currentDir: string, fileName: string): Promise<string> =>
+        new Promise(async (resolve, reject) => {
+            try {
+                let contextDir = path.join(currentDir, path.dirname(fileName));
+                const filePath = this.resolveFileName(contextDir, path.basename(fileName), dirName => {
+                    contextDir = dirName;
+                });
 
-        const filePath = this.resolveFileName(this.getContext().currentDir, path.basename(fileName));
-        const resolvedImport = await this.importResolver(filePath);
-        const parser = new Parser(resolvedImport);
-        const nodes = parser.parse();
+                if (filePath in this.files) {
+                    resolve(filePath);
+                    return;
+                }
 
-        const content = await fileToSource(nodes, this) + this.formatExports();
-        const hasImports = this.getContext().hasImports;
-        const hasExports = ctx.defaultExport !== null || ctx.exports.length > 0;
+                this.files[filePath] = null;
 
-        this.files.push({
-            name: filePath,
-            hasExports,
-            hasImports,
-            content
-        });
+                this.pushContext(contextDir);
+                const ctx = this.getContext();
 
-        this.popContext();
-    }
+                const resolvedImport = await this.importResolver(filePath);
+                const parser = new Parser(resolvedImport);
+                const nodes = parser.parse();
+
+                const content = await fileToSource(nodes, this) + this.formatExports();
+                const hasImports = this.getContext().hasImports;
+                const hasExports = ctx.defaultExport !== null || ctx.exports.length > 0;
+
+                this.files[filePath] = {
+                    name: filePath,
+                    hasExports,
+                    hasImports,
+                    content
+                };
+
+                this.popContext();
+
+                resolve(filePath);
+            } catch (e) {
+                reject(e);
+            }
+        })
 
     private pushContext = (currentDir: string): IBundlerContext => {
         const ctx: IBundlerContext = {

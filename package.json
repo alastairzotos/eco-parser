@@ -24,6 +24,7 @@
     "prettier": "^1.19.1"
   },
   "devDependencies": {
+    "@types/lodash": "^4.14.149",
     "husky": "^4.2.3"
   },
   "husky": {
